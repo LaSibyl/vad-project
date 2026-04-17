@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import librosa
 import os
-from sklearn.metrics import f1_score, confusion_matrix
+from evaluation import compute_metrics, print_metrics
 from scipy.signal import medfilt
 
 
@@ -29,15 +29,6 @@ def build_ground_truth(frame_times):
     gt[(frame_times >= 2.6) & (frame_times <= 4.15)] = 1
 
     return gt
-
-
-def compute_far_miss(y_true, y_pred):
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-
-    far = fp / (fp + tn) if (fp + tn) > 0 else 0.0
-    miss_rate = fn / (fn + tp) if (fn + tp) > 0 else 0.0
-
-    return far, miss_rate, tn, fp, fn, tp
 
 
 def main():
@@ -71,24 +62,13 @@ def main():
     gt = build_ground_truth(frame_times)
 
     # evaluation
-    f1_raw = f1_score(gt, vad_raw)
-    far_raw, miss_raw, tn_r, fp_r, fn_r, tp_r = compute_far_miss(gt, vad_raw)
+    print(f"\nThreshold: {threshold:.4f}")
 
-    f1_smooth = f1_score(gt, vad_smooth)
-    far_smooth, miss_smooth, tn_s, fp_s, fn_s, tp_s = compute_far_miss(gt, vad_smooth)
+    metrics_raw = compute_metrics(gt, vad_raw)
+    metrics_smooth = compute_metrics(gt, vad_smooth)
 
-    print("\n=== Raw VAD Evaluation ===")
-    print(f"Threshold: {threshold:.4f}")
-    print(f"F1 Score: {f1_raw:.4f}")
-    print(f"False Alarm Rate: {far_raw:.4f}")
-    print(f"Miss Rate: {miss_raw:.4f}")
-    print(f"TN={tn_r}, FP={fp_r}, FN={fn_r}, TP={tp_r}")
-
-    print("\n=== Smoothed VAD Evaluation ===")
-    print(f"F1 Score: {f1_smooth:.4f}")
-    print(f"False Alarm Rate: {far_smooth:.4f}")
-    print(f"Miss Rate: {miss_smooth:.4f}")
-    print(f"TN={tn_s}, FP={fp_s}, FN={fn_s}, TP={tp_s}")
+    print_metrics("Raw VAD", metrics_raw)
+    print_metrics("Smoothed VAD", metrics_smooth)
 
     # plot
     plt.figure(figsize=(12, 10))
