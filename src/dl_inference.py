@@ -78,9 +78,19 @@ def load_audio_frames(audio_path, frame_len=320, hop_len=160):
     return frames
 
 
-def build_cnn_inputs(frames, n_frames=5):
+def build_cnn_inputs(frames, n_frames=5, return_stats=False, normalize=False):
     """
     Convert raw frames → log-mel → context window
+    
+    Args:
+        frames: (num_frames, frame_len) audio frames
+        n_frames: context window size (default 5)
+        return_stats: if True, return feature statistics
+        normalize: if True, normalize each window to zero mean and unit variance
+    
+    Returns:
+        If return_stats=False: (T-4, 200) array of CNN inputs
+        If return_stats=True:  (inputs, stats_dict)
     """
     extractor = LogMelExtractor()
 
@@ -96,19 +106,54 @@ def build_cnn_inputs(frames, n_frames=5):
     inputs = []
     for i in range(len(features) - n_frames + 1):
         window = features[i:i+n_frames].flatten()  # (40×5=200)
+        
+        # Normalize: zero mean, unit variance
+        if normalize:
+            window = (window - window.mean()) / (window.std() + 1e-6)
+        
         inputs.append(window)
 
-    return np.array(inputs)  # (T-4, 200)
+    inputs = np.array(inputs)  # (T-4, 200)
+    
+    if return_stats:
+        stats = {
+            "min": inputs.min(),
+            "max": inputs.max(),
+            "mean": inputs.mean(),
+            "std": inputs.std(),
+            "median": np.median(inputs),
+            "shape": inputs.shape,
+            "data": inputs.flatten()  # for histogram
+        }
+        return inputs, stats
+    
+    return inputs
 
 
-def run_dl_on_audio(audio_path, checkpoint_path):
+def run_dl_on_audio(audio_path, checkpoint_path, return_feature_stats=False, normalize_inputs=False):
+    """
+    Run CNN inference on real audio.
+    
+    Args:
+        audio_path: path to audio file
+        checkpoint_path: path to saved model checkpoint
+        return_feature_stats: if True, return input feature statistics
+        normalize_inputs: if True, normalize each input window to zero mean/unit variance
+                         (useful for debugging distribution mismatch)
+    
+    Returns:
+        dict with y_prob, y_pred, and optionally feature_stats
+    """
     device = torch.device("cpu")
 
     # 1. load frames
     frames = load_audio_frames(audio_path)
 
-    # 2. build CNN inputs
-    X = build_cnn_inputs(frames)
+    # 2. build CNN inputs (with optional normalization)
+    X, feature_stats = build_cnn_inputs(frames, return_stats=True, normalize=normalize_inputs)
+    
+    if normalize_inputs:
+        print(f"✓ Input normalization enabled (per-window zero mean/unit variance)")
 
     # 3. load model
     model = LightweightCNN_VAD().to(device)
@@ -122,8 +167,13 @@ def run_dl_on_audio(audio_path, checkpoint_path):
         probs = model(X_tensor).squeeze().numpy()
         preds = (probs > 0.5).astype(int)
 
-    return {
+    result = {
         "y_prob": probs,
         "y_pred": preds
     }
+    
+    if return_feature_stats:
+        result["feature_stats"] = feature_stats
+    
+    return result
 

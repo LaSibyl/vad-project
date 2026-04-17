@@ -278,6 +278,7 @@ def run_training(strategy_name, snr_schedule=None):
     """
     Train model under a given augmentation strategy.
     snr_schedule: list of SNR values per epoch (for curriculum strategy).
+    Returns: (history, model_run, synthetic_feature_stats)
     """
     print(f"\n{'═' * 60}")
     print(f"  Strategy: {strategy_name.upper()}")
@@ -290,6 +291,21 @@ def run_training(strategy_name, snr_schedule=None):
 
     val_dataset = SyntheticVADDataset(500, strategy='none')
     val_loader  = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+    
+    # Collect synthetic feature statistics from first batch (only for first strategy)
+    synthetic_feature_stats = None
+    if strategy_name == 'none':
+        first_train_dataset = SyntheticVADDataset(2000, strategy=strategy_name, snr_db=None)
+        X_sample = first_train_dataset.X[:1000]  # First 1000 samples
+        synthetic_feature_stats = {
+            "min": X_sample.min().item(),
+            "max": X_sample.max().item(),
+            "mean": X_sample.mean().item(),
+            "std": X_sample.std().item(),
+            "median": torch.median(X_sample).item(),
+            "shape": X_sample.shape,
+            "data": X_sample.cpu().numpy().flatten()
+        }
 
     history = []
     for epoch in range(1, EPOCHS + 1):
@@ -314,7 +330,7 @@ def run_training(strategy_name, snr_schedule=None):
 
     final_f1 = history[-1]['val_f1']
     print(f"\n  Final val F1 ({strategy_name}): {final_f1:.4f}")
-    return history, model_run
+    return history, model_run, synthetic_feature_stats
 
 
 
@@ -347,14 +363,14 @@ def main():
     print()
 
     # ① No augmentation
-    hist_none, model_none = run_training('none')
+    hist_none, model_none, syn_stats = run_training('none')
 
     # ② Uniform
-    hist_uniform, model_uniform = run_training('uniform')
+    hist_uniform, model_uniform, _ = run_training('uniform')
 
     # ③ Curriculum
     curriculum_snr = [20, 15, 10, 5, 0]
-    hist_curriculum, model_curriculum = run_training(
+    hist_curriculum, model_curriculum, _ = run_training(
         'curriculum',
         snr_schedule=curriculum_snr
     )
