@@ -22,6 +22,8 @@ import numpy as np
 import random
 import math
 import time
+import os
+from pathlib import Path
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
 SEED = 42
@@ -39,11 +41,10 @@ BATCH_SIZE    = 64
 EPOCHS        = 5           # short demo; real training would be ~20+
 LR            = 1e-3
 
-print("=" * 60)
-print("CS 6140  |  VAD Deep Learning Demo")
-print("=" * 60)
-print(f"Config: {FRAME_MS}ms frames | {N_MELS} mel bins | seed={SEED}")
-print()
+PROJECT_ROOT   = Path(__file__).resolve().parent.parent
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+
+
 
 
 # ── 1. Log-Mel Spectrogram Feature Extractor ─────────────────────────────────
@@ -114,13 +115,7 @@ class LogMelExtractor(nn.Module):
         return log_mel
 
 
-print("── Feature Extractor ────────────────────────────────────")
-extractor = LogMelExtractor()
-dummy_wave = torch.randn(4, FRAME_LEN)
-dummy_feat = extractor(dummy_wave)
-print(f"Input waveform shape : {dummy_wave.shape}")
-print(f"Log-Mel feature shape: {dummy_feat.shape}  (batch × {N_MELS} mel bins)")
-print()
+
 
 
 # ── 2. Lightweight CNN VAD Model ──────────────────────────────────────────────
@@ -175,14 +170,7 @@ class LightweightCNN_VAD(nn.Module):
         return self.classifier(x)
 
 
-model = LightweightCNN_VAD()
-total_params = sum(p.numel() for p in model.parameters())
-print("── Model Architecture ───────────────────────────────────")
-print(model)
-print()
-print(f"Total parameters : {total_params:,}")
-print(f"Constraint check : {'✓ PASS' if total_params < 500_000 else '✗ FAIL'} (<500K)")
-print()
+
 
 
 # ── 3. Synthetic Dataset (stand-in for LibriSpeech + MUSAN) ──────────────────
@@ -329,52 +317,96 @@ def run_training(strategy_name, snr_schedule=None):
     return history, model_run
 
 
-# ── Run all three augmentation strategies (from proposal) ────────────────────
-print("── Training: Strategy Comparison ───────────────────────")
-print("  Strategies: ① No-Aug  ② Uniform SNR  ③ Curriculum SNR")
-print()
 
-# ① No augmentation (baseline DL)
-hist_none, model_none = run_training('none')
+def main():
+    print("=" * 60)
+    print("CS 6140  |  VAD Deep Learning Demo")
+    print("=" * 60)
+    print(f"Config: {FRAME_MS}ms frames | {N_MELS} mel bins | seed={SEED}")
+    print()
 
-# ② Uniform SNR augmentation (0–20 dB randomly per sample)
-hist_uniform, model_uniform = run_training('uniform')
+    print("── Feature Extractor ────────────────────────────────────")
+    extractor = LogMelExtractor()
+    dummy_wave = torch.randn(4, FRAME_LEN)
+    dummy_feat = extractor(dummy_wave)
+    print(f"Input waveform shape : {dummy_wave.shape}")
+    print(f"Log-Mel feature shape: {dummy_feat.shape}  (batch × {N_MELS} mel bins)")
+    print()
 
-# ③ Curriculum augmentation: start easy (20 dB) → get harder (0 dB)
-curriculum_snr = [20, 15, 10, 5, 0]   # one SNR per epoch
-hist_curriculum, model_curriculum = run_training('curriculum', snr_schedule=curriculum_snr)
+    model_demo = LightweightCNN_VAD()
+    total_params = sum(p.numel() for p in model_demo.parameters())
+    print("── Model Architecture ───────────────────────────────────")
+    print(model_demo)
+    print()
+    print(f"Total parameters : {total_params:,}")
+    print(f"Constraint check : {'✓ PASS' if total_params < 500_000 else '✗ FAIL'} (<500K)")
+    print()
 
+    print("── Training: Strategy Comparison ───────────────────────")
+    print("  Strategies: ① No-Aug  ② Uniform SNR  ③ Curriculum SNR")
+    print()
 
-# ── 5. Summary Table ──────────────────────────────────────────────────────────
-print()
-print("── Results Summary ──────────────────────────────────────")
-print(f"  {'Strategy':<18}  {'Final Val F1':>12}  {'Best Val F1':>11}")
-print(f"  {'-'*18}  {'-'*12}  {'-'*11}")
-for name, hist in [('No Augmentation', hist_none),
-                   ('Uniform SNR',     hist_uniform),
-                   ('Curriculum SNR',  hist_curriculum)]:
-    final = hist[-1]['val_f1']
-    best  = max(h['val_f1'] for h in hist)
-    print(f"  {name:<18}  {final:>12.4f}  {best:>11.4f}")
+    # ① No augmentation
+    hist_none, model_none = run_training('none')
 
-print()
-print("── Latency Benchmark (CPU) ──────────────────────────────")
-model_curriculum.eval()
-dummy_input = torch.randn(1, N_MELS * N_FRAMES)
-N_RUNS = 1000
-t0 = time.time()
-with torch.no_grad():
-    for _ in range(N_RUNS):
-        _ = model_curriculum(dummy_input)
-avg_ms = (time.time() - t0) / N_RUNS * 1000
-print(f"  Avg inference time over {N_RUNS} frames: {avg_ms:.3f} ms/frame")
-print(f"  Real-time constraint check : {'✓ PASS' if avg_ms < 20 else '✗ FAIL'} (must be <{FRAME_MS}ms)")
+    # ② Uniform
+    hist_uniform, model_uniform = run_training('uniform')
 
-print()
-print("── Next Steps ───────────────────────────────────────────")
-print("  • Replace synthetic data with real LibriSpeech + MUSAN")
-print("  • Finalize CNN vs. MLP architecture selection")
-print("  • Extend training to 20+ epochs on full dataset")
-print("  • Coordinate with Gengyuan on shared eval module format")
-print()
-print("Done.")
+    # ③ Curriculum
+    curriculum_snr = [20, 15, 10, 5, 0]
+    hist_curriculum, model_curriculum = run_training(
+        'curriculum',
+        snr_schedule=curriculum_snr
+    )
+
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+
+    none_ckpt = CHECKPOINT_DIR / "cnn_none.pt"
+    uniform_ckpt = CHECKPOINT_DIR / "cnn_uniform.pt"
+    curriculum_ckpt = CHECKPOINT_DIR / "cnn_curriculum.pt"
+
+    torch.save(model_none.state_dict(), none_ckpt)
+    torch.save(model_uniform.state_dict(), uniform_ckpt)
+    torch.save(model_curriculum.state_dict(), curriculum_ckpt)
+
+    print("\nCheckpoints saved.")
+    print(f"  {none_ckpt}")
+    print(f"  {uniform_ckpt}")
+    print(f"  {curriculum_ckpt}")
+
+    # ── 5. Summary Table ──────────────────────────────────────────────────────────
+    print()
+    print("── Results Summary ──────────────────────────────────────")
+    print(f"  {'Strategy':<18}  {'Final Val F1':>12}  {'Best Val F1':>11}")
+    print(f"  {'-'*18}  {'-'*12}  {'-'*11}")
+    for name, hist in [('No Augmentation', hist_none),
+                       ('Uniform SNR',     hist_uniform),
+                       ('Curriculum SNR',  hist_curriculum)]:
+        final = hist[-1]['val_f1']
+        best  = max(h['val_f1'] for h in hist)
+        print(f"  {name:<18}  {final:>12.4f}  {best:>11.4f}")
+
+    print()
+    print("── Latency Benchmark (CPU) ──────────────────────────────")
+    model_curriculum.eval()
+    dummy_input = torch.randn(1, N_MELS * N_FRAMES)
+    N_RUNS = 1000
+    t0 = time.time()
+    with torch.no_grad():
+        for _ in range(N_RUNS):
+            _ = model_curriculum(dummy_input)
+    avg_ms = (time.time() - t0) / N_RUNS * 1000
+    print(f"  Avg inference time over {N_RUNS} frames: {avg_ms:.3f} ms/frame")
+    print(f"  Real-time constraint check : {'✓ PASS' if avg_ms < 20 else '✗ FAIL'} (must be <{FRAME_MS}ms)")
+
+    print()
+    print("── Next Steps ───────────────────────────────────────────")
+    print("  • Replace synthetic data with real LibriSpeech + MUSAN")
+    print("  • Finalize CNN vs. MLP architecture selection")
+    print("  • Extend training to 20+ epochs on full dataset")
+    print("  • Coordinate with Gengyuan on shared eval module format")
+    print()
+    print("Done.")
+
+if __name__ == "__main__":
+    main()

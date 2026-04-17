@@ -10,20 +10,8 @@ def run_dl_inference(
     n_samples=500,
     batch_size=64,
     snr_db=None,
-    use_untrained_model=True,
+    checkpoint_path=None,
 ):
-    """
-    Run DL inference and return y_true, y_pred in a unified format.
-
-    Current version:
-    - Uses teammate's SyntheticVADDataset
-    - Uses LightweightCNN_VAD
-    - By default runs an untrained model scaffold for integration testing
-
-    Later:
-    - Replace with trained checkpoint loading
-    - Replace synthetic data with real dataset
-    """
     device = torch.device("cpu")
 
     dataset = SyntheticVADDataset(
@@ -35,9 +23,12 @@ def run_dl_inference(
 
     model = LightweightCNN_VAD().to(device)
 
-    # Future extension:
-    # if not use_untrained_model:
-    #     model.load_state_dict(torch.load("path/to/checkpoint.pt", map_location=device))
+    if checkpoint_path is not None:
+        state_dict = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(state_dict)
+        print(f"Loaded checkpoint: {checkpoint_path}")
+    else:
+        print("Warning: no checkpoint loaded, using randomly initialized model.")
 
     model.eval()
 
