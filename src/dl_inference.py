@@ -1,8 +1,9 @@
 import numpy as np
 import torch
+import librosa
 from torch.utils.data import DataLoader
 
-from vad_dl_demo import LightweightCNN_VAD, SyntheticVADDataset
+from vad_dl_demo import LightweightCNN_VAD, SyntheticVADDataset, LogMelExtractor
 
 
 def run_dl_inference(
@@ -55,3 +56,74 @@ def run_dl_inference(
         "strategy": strategy,
         "n_samples": n_samples,
     }
+
+
+def load_audio_frames(audio_path, frame_len=320, hop_len=160):
+    """
+    Split audio into frames using librosa.
+    Matches Energy VAD framing for consistency:
+      frame_len=320 (20ms @ 16kHz)
+      hop_len=160 (10ms @ 16kHz, 50% overlap)
+    
+    Returns:
+        frames: (num_frames, frame_len) array
+    """
+    signal, sr = librosa.load(audio_path, sr=16000)
+
+    # Use librosa for consistent framing (no manual loop)
+    frames = librosa.util.frame(signal, frame_length=frame_len, hop_length=hop_len)
+    frames = frames.T  # Transpose to (num_frames, frame_len)
+    
+    print(f"Frames shape: {frames.shape}")
+    return frames
+
+
+def build_cnn_inputs(frames, n_frames=5):
+    """
+    Convert raw frames → log-mel → context window
+    """
+    extractor = LogMelExtractor()
+
+    features = []
+    for frame in frames:
+        frame_tensor = torch.tensor(frame).unsqueeze(0)  # (1, 320)
+        mel = extractor(frame_tensor).squeeze().numpy()  # (40,)
+        features.append(mel)
+
+    features = np.array(features)  # (T, 40)
+
+    # sliding window: 5 frames
+    inputs = []
+    for i in range(len(features) - n_frames + 1):
+        window = features[i:i+n_frames].flatten()  # (40×5=200)
+        inputs.append(window)
+
+    return np.array(inputs)  # (T-4, 200)
+
+
+def run_dl_on_audio(audio_path, checkpoint_path):
+    device = torch.device("cpu")
+
+    # 1. load frames
+    frames = load_audio_frames(audio_path)
+
+    # 2. build CNN inputs
+    X = build_cnn_inputs(frames)
+
+    # 3. load model
+    model = LightweightCNN_VAD().to(device)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 4. inference
+    with torch.no_grad():
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        probs = model(X_tensor).squeeze().numpy()
+        preds = (probs > 0.5).astype(int)
+
+    return {
+        "y_prob": probs,
+        "y_pred": preds
+    }
+
