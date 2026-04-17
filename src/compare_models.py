@@ -31,7 +31,7 @@ def main():
     print("=" * 68)
 
     project_root = Path(__file__).resolve().parent.parent
-    curriculum_ckpt = project_root / "checkpoints" / "cnn_curriculum.pt"
+    curriculum_ckpt = project_root / "checkpoints" / "cnn_real_data.pt"
 
     # ===== Energy baseline =====
     energy_result = run_energy_vad(return_details=True, plot=False)
@@ -65,7 +65,7 @@ def main():
         dl_result["y_pred"]
     )
 
-    print_metrics("CNN VAD - Synthetic Demo", metrics_dl)
+    print_metrics("CNN VAD - Real Audio Trained", metrics_dl)
 
     # ===== FEATURE DISTRIBUTION ANALYSIS (Step 1) =====
     print("\n" + "=" * 68)
