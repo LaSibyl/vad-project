@@ -96,6 +96,21 @@ def main():
         print("Run build_real_dataset.py first!")
         return
 
+    # ── Feature normalisation (z-score) ──────────────────────────────────────
+    # Compute statistics from training split and normalise both splits so the
+    # model always sees features with mean≈0, std≈1 regardless of recording level.
+    # The same scaler is saved to disk and applied at inference time.
+    feat_mean = train_dataset.X.mean(dim=0)           # (200,)
+    feat_std  = train_dataset.X.std(dim=0).clamp(min=1e-6)  # (200,)
+
+    train_dataset.X = (train_dataset.X - feat_mean) / feat_std
+    val_dataset.X   = (val_dataset.X   - feat_mean) / feat_std
+
+    scaler_path = CHECKPOINT_DIR / "feature_scaler.pt"
+    torch.save({"mean": feat_mean, "std": feat_std}, scaler_path)
+    print(f"  Feature scaler saved → mean_avg={feat_mean.mean():.4f}, std_avg={feat_std.mean():.4f}")
+    print()
+
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 

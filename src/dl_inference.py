@@ -1,9 +1,80 @@
+import math
 import numpy as np
 import torch
 import librosa
+from pathlib import Path
 from torch.utils.data import DataLoader
 
 from vad_dl_demo import LightweightCNN_VAD, SyntheticVADDataset, LogMelExtractor
+
+# ── Numpy-based feature extraction (matches build_real_dataset.py exactly) ───
+# Duplicated here to keep dl_inference self-contained and avoid triggering
+# build_real_dataset.py's module-level side effects on import.
+
+SAMPLE_RATE = 16000
+FRAME_LEN   = 320   # 20 ms @ 16 kHz
+N_MELS      = 40
+N_FRAMES    = 5
+N_FFT       = 512
+
+
+def _build_mel_filterbank(sample_rate=SAMPLE_RATE, n_fft=N_FFT, n_mels=N_MELS):
+    def hz_to_mel(hz):  return 2595.0 * math.log10(1.0 + hz / 700.0)
+    def mel_to_hz(mel): return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+    low_mel  = hz_to_mel(0)
+    high_mel = hz_to_mel(sample_rate / 2)
+    mel_pts  = np.linspace(low_mel, high_mel, n_mels + 2)
+    hz_pts   = np.array([mel_to_hz(m) for m in mel_pts])
+    bin_pts  = np.floor((n_fft + 1) * hz_pts / sample_rate).astype(int)
+
+    fbank = np.zeros((n_mels, n_fft // 2 + 1))
+    for m in range(1, n_mels + 1):
+        f_m_minus, f_m, f_m_plus = bin_pts[m-1], bin_pts[m], bin_pts[m+1]
+        for k in range(f_m_minus, f_m):
+            if f_m != f_m_minus:
+                fbank[m-1, k] = (k - f_m_minus) / (f_m - f_m_minus)
+        for k in range(f_m, f_m_plus):
+            if f_m_plus != f_m:
+                fbank[m-1, k] = (f_m_plus - k) / (f_m_plus - f_m)
+    return fbank
+
+
+def _extract_log_mel(frame):
+    """Extract log-mel features from a single 320-sample frame (numpy)."""
+    window = np.hanning(FRAME_LEN)
+    x = np.zeros(FRAME_LEN)
+    x[:len(frame)] = frame[:FRAME_LEN]
+    x = x * window
+
+    x_padded = np.zeros(N_FFT)
+    x_padded[:FRAME_LEN] = x
+    spec  = np.fft.rfft(x_padded)
+    power = spec.real ** 2 + spec.imag ** 2
+
+    mel_fb  = _build_mel_filterbank()
+    mel     = np.dot(power, mel_fb.T)
+    log_mel = np.log(np.clip(mel, a_min=1e-9, a_max=None))
+    return log_mel   # (N_MELS,)
+
+
+def _extract_context_features(audio_segment):
+    """
+    Extract a (N_MELS * N_FRAMES,) feature vector from a 1600-sample segment.
+    Identical to build_real_dataset.extract_context_features().
+    """
+    expected = FRAME_LEN * N_FRAMES   # 1600
+    if len(audio_segment) < expected:
+        audio_segment = np.pad(audio_segment, (0, expected - len(audio_segment)))
+    else:
+        audio_segment = audio_segment[:expected]
+
+    features = []
+    for i in range(N_FRAMES):
+        frame = audio_segment[i * FRAME_LEN: (i + 1) * FRAME_LEN]
+        features.append(_extract_log_mel(frame))
+
+    return np.concatenate(features).astype(np.float32)  # (200,)
 
 
 def run_dl_inference(
@@ -59,106 +130,85 @@ def run_dl_inference(
     }
 
 
-def load_audio_frames(audio_path, frame_len=320, hop_len=160):
+def load_audio_signal(audio_path):
+    """Load audio as a raw float32 signal at 16 kHz."""
+    signal, _ = librosa.load(audio_path, sr=16000, mono=True)
+    print(f"Audio: {len(signal)} samples ({len(signal)/16000:.2f}s)")
+    return signal
+
+
+def build_cnn_inputs(signal, hop=160, return_stats=False):
     """
-    Split audio into frames using librosa.
-    Matches Energy VAD framing for consistency:
-      frame_len=320 (20ms @ 16kHz)
-      hop_len=160 (10ms @ 16kHz, 50% overlap)
-    
+    Convert raw audio signal → CNN feature matrix using the same pipeline
+    as build_real_dataset.py (numpy FFT, non-overlapping frames per window).
+
+    Slides a 1600-sample (100 ms) window over the signal with ``hop`` steps.
+    Default hop=160 (10 ms) gives one prediction per energy-VAD frame.
+
     Returns:
-        frames: (num_frames, frame_len) array
+        inputs: (T, 200) float32 feature matrix  [return_stats=False]
+        (inputs, stats): tuple                   [return_stats=True]
     """
-    signal, sr = librosa.load(audio_path, sr=16000)
+    window_len = FRAME_LEN * N_FRAMES   # 1600 samples
+    positions  = range(0, len(signal) - window_len + 1, hop)
 
-    # Use librosa for consistent framing (no manual loop)
-    frames = librosa.util.frame(signal, frame_length=frame_len, hop_length=hop_len)
-    frames = frames.T  # Transpose to (num_frames, frame_len)
-    
-    print(f"Frames shape: {frames.shape}")
-    return frames
+    inputs = np.array(
+        [_extract_context_features(signal[s: s + window_len]) for s in positions],
+        dtype=np.float32,
+    )
 
-
-def build_cnn_inputs(frames, n_frames=5, return_stats=False, normalize=False):
-    """
-    Convert raw frames → log-mel → context window
-    
-    Args:
-        frames: (num_frames, frame_len) audio frames
-        n_frames: context window size (default 5)
-        return_stats: if True, return feature statistics
-        normalize: if True, normalize each window to zero mean and unit variance
-    
-    Returns:
-        If return_stats=False: (T-4, 200) array of CNN inputs
-        If return_stats=True:  (inputs, stats_dict)
-    """
-    extractor = LogMelExtractor()
-
-    features = []
-    for frame in frames:
-        frame_tensor = torch.tensor(frame).unsqueeze(0)  # (1, 320)
-        mel = extractor(frame_tensor).squeeze().numpy()  # (40,)
-        features.append(mel)
-
-    features = np.array(features)  # (T, 40)
-
-    # sliding window: 5 frames
-    inputs = []
-    for i in range(len(features) - n_frames + 1):
-        window = features[i:i+n_frames].flatten()  # (40×5=200)
-        
-        # Normalize: zero mean, unit variance
-        if normalize:
-            window = (window - window.mean()) / (window.std() + 1e-6)
-        
-        inputs.append(window)
-
-    inputs = np.array(inputs)  # (T-4, 200)
-    
     if return_stats:
         stats = {
-            "min": inputs.min(),
-            "max": inputs.max(),
-            "mean": inputs.mean(),
-            "std": inputs.std(),
+            "min":    inputs.min(),
+            "max":    inputs.max(),
+            "mean":   inputs.mean(),
+            "std":    inputs.std(),
             "median": np.median(inputs),
-            "shape": inputs.shape,
-            "data": inputs.flatten()  # for histogram
+            "shape":  inputs.shape,
+            "data":   inputs.flatten(),
         }
         return inputs, stats
-    
     return inputs
 
 
 def run_dl_on_audio(audio_path, checkpoint_path, return_feature_stats=False, normalize_inputs=False):
     """
-    Run CNN inference on real audio.
-    
+    Run CNN inference on real audio using the same feature extraction
+    pipeline as training (numpy FFT, non-overlapping frames per window).
+
     Args:
-        audio_path: path to audio file
-        checkpoint_path: path to saved model checkpoint
-        return_feature_stats: if True, return input feature statistics
-        normalize_inputs: if True, normalize each input window to zero mean/unit variance
-                         (useful for debugging distribution mismatch)
-    
+        audio_path:           path to audio file
+        checkpoint_path:      path to saved model checkpoint
+        return_feature_stats: if True, include feature statistics in result
+        normalize_inputs:     ignored (kept for API compatibility; normalization
+                              is no longer applied — use matched extractor instead)
+
     Returns:
         dict with y_prob, y_pred, and optionally feature_stats
     """
     device = torch.device("cpu")
 
-    # 1. load frames
-    frames = load_audio_frames(audio_path)
+    # 1. load raw signal
+    signal = load_audio_signal(audio_path)
 
-    # 2. build CNN inputs (with optional normalization)
-    X, feature_stats = build_cnn_inputs(frames, return_stats=True, normalize=normalize_inputs)
-    
-    if normalize_inputs:
-        print(f"✓ Input normalization enabled (per-window zero mean/unit variance)")
+    # 2. extract features (same pipeline as training)
+    X, feature_stats = build_cnn_inputs(signal, return_stats=True)
+    print(f"Feature matrix: {X.shape}")
 
-    # 3. load model
+    # 3. apply the same z-score normalisation used at training time
+    scaler_path = str(Path(checkpoint_path).parent / "feature_scaler.pt")
+    if Path(scaler_path).exists():
+        scaler = torch.load(scaler_path, map_location="cpu", weights_only=True)
+        feat_mean = scaler["mean"].numpy()   # (200,)
+        feat_std  = scaler["std"].numpy()    # (200,)
+        X = (X - feat_mean) / (feat_std + 1e-6)
+        print(f"Applied feature scaler (mean_avg={feat_mean.mean():.4f}, std_avg={feat_std.mean():.4f})")
+    else:
+        print(f"Warning: no feature_scaler.pt found at {scaler_path}; skipping normalisation")
+
+    # 4. load model
     model = LightweightCNN_VAD().to(device)
-    state_dict = torch.load(checkpoint_path, map_location=device)
+    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -166,16 +216,11 @@ def run_dl_on_audio(audio_path, checkpoint_path, return_feature_stats=False, nor
     with torch.no_grad():
         X_tensor = torch.tensor(X, dtype=torch.float32)
         logits = model(X_tensor).squeeze()
-        probs = torch.sigmoid(logits).numpy()   # model outputs logits; convert to probabilities
-        preds = (probs > 0.5).astype(int)
+        probs  = torch.sigmoid(logits).numpy()
+        preds  = (probs > 0.5).astype(int)
 
-    result = {
-        "y_prob": probs,
-        "y_pred": preds
-    }
-    
+    result = {"y_prob": probs, "y_pred": preds}
     if return_feature_stats:
         result["feature_stats"] = feature_stats
-    
     return result
 
