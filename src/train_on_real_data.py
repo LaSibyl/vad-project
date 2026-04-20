@@ -45,26 +45,26 @@ MODEL_NAME = "cnn_real_data.pt"
 # ──────────────────────────────────────────────────────────────────────────────
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
-    """Train for one epoch."""
+    """Train for one epoch. criterion should be BCEWithLogitsLoss."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
-    
+
     for X_batch, y_batch in loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        
+
         optimizer.zero_grad()
-        preds = model(X_batch).squeeze()
-        
+        logits = model(X_batch).squeeze()
+
         # Handle batch size = 1
-        if preds.dim() == 0:
-            preds = preds.unsqueeze(0)
-        
-        loss = criterion(preds, y_batch)
+        if logits.dim() == 0:
+            logits = logits.unsqueeze(0)
+
+        loss = criterion(logits, y_batch)
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * len(y_batch)
-        predicted = (preds > 0.5).float()
+        predicted = (logits > 0.0).float()   # logit > 0 ↔ sigmoid > 0.5
         correct += (predicted == y_batch).sum().item()
         total += len(y_batch)
 
@@ -117,9 +117,21 @@ def main():
         print(f"  ✓ Within 500K parameter constraint")
     print()
 
+    # Class balance analysis
+    n_pos = train_dataset.y.sum().item()
+    n_neg = len(train_dataset.y) - n_pos
+    ratio = n_pos / max(n_neg, 1)
+    print(f"  Speech (pos): {int(n_pos)}, Non-speech (neg): {int(n_neg)}")
+    print(f"  Speech ratio: {n_pos / (n_pos + n_neg):.1%} — using no class weighting (mild imbalance)")
+    print()
+
     # Optimizer & criterion
+    # BCEWithLogitsLoss: numerically stable, no sigmoid needed in model.
+    # No pos_weight: 2:1 imbalance is mild; letting the model learn the natural prior
+    # yields better-calibrated probabilities and a 0.5 threshold that actually works.
     optimizer = optim.Adam(model.parameters(), lr=LR_REAL)
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
+    eval_criterion = nn.BCEWithLogitsLoss()
 
     # Training loop
     print("── Training ─────────────────────────────────────────────")
@@ -133,7 +145,7 @@ def main():
         tr_loss, tr_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
 
         # Validate
-        val_loss, val_acc, val_f1 = evaluate(model, val_loader, criterion, device)
+        val_loss, val_acc, val_f1 = evaluate(model, val_loader, eval_criterion, device)
 
         elapsed = time.time() - t0
         history.append({'epoch': epoch, 'tr_loss': tr_loss, 'tr_acc': tr_acc,

@@ -42,7 +42,8 @@ def run_dl_inference(
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            probs = model(X_batch).squeeze()
+            logits = model(X_batch).squeeze()
+            probs = torch.sigmoid(logits)   # model outputs logits; convert to probabilities
             preds = (probs > 0.5).float()
 
             y_true_all.extend(y_batch.cpu().numpy())
@@ -164,7 +165,8 @@ def run_dl_on_audio(audio_path, checkpoint_path, return_feature_stats=False, nor
     # 4. inference
     with torch.no_grad():
         X_tensor = torch.tensor(X, dtype=torch.float32)
-        probs = model(X_tensor).squeeze().numpy()
+        logits = model(X_tensor).squeeze()
+        probs = torch.sigmoid(logits).numpy()   # model outputs logits; convert to probabilities
         preds = (probs > 0.5).astype(int)
 
     result = {

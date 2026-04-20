@@ -159,7 +159,8 @@ class LightweightCNN_VAD(nn.Module):
             nn.Linear(64 * 8, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
-            nn.Sigmoid(),
+            # No Sigmoid here — model outputs raw logits.
+            # Use BCEWithLogitsLoss for training; apply torch.sigmoid() at inference.
         )
 
     def forward(self, x):
@@ -260,7 +261,7 @@ def evaluate(model, loader, criterion, device):
             loss  = criterion(preds, y_batch)
 
             total_loss += loss.item() * len(y_batch)
-            predicted   = (preds > 0.5).float()
+            predicted   = (preds > 0.0).float()   # logit > 0 ↔ sigmoid > 0.5
             correct    += (predicted == y_batch).sum().item()
             total      += len(y_batch)
 
