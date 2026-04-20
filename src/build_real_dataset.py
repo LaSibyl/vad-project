@@ -272,17 +272,26 @@ def build_real_vad_dataset(split='train', n_samples=5000, snr_range=(5, 15)):
     
     # Load speech segments
     speech_segments = []
+    silence_segments = []    # low-energy pauses from the same recordings
+    seg_len = FRAME_LEN * N_FRAMES  # 1600 samples
+    rms_threshold = 0.005           # segments below this RMS are "silence"
+
     sample_speech_files = random.sample(speech_files, min(50, len(speech_files)))
     for fpath in tqdm(sample_speech_files, desc="Speech"):
         audio = load_audio(fpath)
-        if audio is not None and len(audio) > FRAME_LEN * N_FRAMES:
+        if audio is not None and len(audio) > seg_len:
             # Split into fixed-length segments
-            for start in range(0, len(audio) - FRAME_LEN * N_FRAMES, FRAME_LEN * N_FRAMES):
-                segment = audio[start:start + FRAME_LEN * N_FRAMES]
-                if len(segment) == FRAME_LEN * N_FRAMES:
-                    speech_segments.append(segment)
+            for start in range(0, len(audio) - seg_len, seg_len):
+                segment = audio[start:start + seg_len]
+                if len(segment) == seg_len:
+                    rms = float(np.sqrt(np.mean(segment ** 2)))
+                    if rms < rms_threshold:
+                        silence_segments.append(segment)
+                    else:
+                        speech_segments.append(segment)
     
     print(f"  ✓ Extracted {len(speech_segments)} speech segments")
+    print(f"  ✓ Extracted {len(silence_segments)} silence segments (RMS < {rms_threshold})")
     
     # Load noise segments
     noise_segments = []
@@ -299,13 +308,19 @@ def build_real_vad_dataset(split='train', n_samples=5000, snr_range=(5, 15)):
     print(f"  ✓ Extracted {len(noise_segments)} noise segments")
     
     # Generate training samples
+    # 4 categories (balanced → 50 % speech, 50 % non-speech):
+    #   0 – speech only          (label 1)
+    #   1 – MUSAN noise only     (label 0)
+    #   2 – speech + noise mixed (label 1)
+    #   3 – silence / near-silence (label 0)
     print("\n[3/4] Generating training samples...")
     X_list = []
     y_list = []
     
+    seg_len = FRAME_LEN * N_FRAMES  # 1600 samples
+    
     for i in tqdm(range(n_samples), desc="Samples"):
-        # Decide on sample type (1/3 each: speech only, noise only, mixed)
-        sample_type = i % 3
+        sample_type = i % 4
         
         if sample_type == 0:
             # Speech only (label=1)
@@ -321,7 +336,7 @@ def build_real_vad_dataset(split='train', n_samples=5000, snr_range=(5, 15)):
             X_list.append(features)
             y_list.append(0)
             
-        else:
+        elif sample_type == 2:
             # Mixed: speech + noise (label=1)
             speech = random.choice(speech_segments)
             noise = random.choice(noise_segments)
@@ -331,6 +346,21 @@ def build_real_vad_dataset(split='train', n_samples=5000, snr_range=(5, 15)):
             features = extract_context_features(mixed, SAMPLE_RATE, 512, N_MELS, N_FRAMES)
             X_list.append(features)
             y_list.append(1)
+            
+        else:
+            # Silence / near-silence (label=0)
+            # Use real low-energy pauses extracted from LibriSpeech recordings.
+            # These capture the actual mic noise / room tone spectral shape
+            # that appears in real WAV silence regions.
+            if silence_segments:
+                silence = random.choice(silence_segments)
+            else:
+                # Fallback: very low amplitude white noise
+                amp = 10 ** random.uniform(-5, -2)
+                silence = np.random.randn(seg_len).astype(np.float32) * amp
+            features = extract_context_features(silence, SAMPLE_RATE, 512, N_MELS, N_FRAMES)
+            X_list.append(features)
+            y_list.append(0)
     
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.float32)
